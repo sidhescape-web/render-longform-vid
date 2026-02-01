@@ -69,7 +69,12 @@ Copy from `.env.example` and fill in real values. **Do not** commit `.env` or pr
 
 - Railway builds from the repo and runs: `uvicorn main:app --host 0.0.0.0 --port $PORT`
 - **Health check**: `GET /health` should return `{"status":"ok"}`. Configure this in Railway’s service settings if the platform supports it.
-- **Timeout**: Merging can take several minutes. Consider increasing request timeout (e.g. 600s) or moving to async jobs later.
+
+**Timeouts (to avoid 502):**
+- **Railway** allows up to **15 minutes** per HTTP request. Your merge (download + FFmpeg + upload) must finish within that.
+- **Server-side** (this API): download up to 5 min per video, FFmpeg up to 1 hour. No extra config needed.
+- **Client**: use a long timeout so the client doesn’t give up before Railway (e.g. `curl --max-time 900` or 15 min in your app).
+- **Typical use**: 2–4 short clips (e.g. &lt; 1 min each) usually complete in 1–3 minutes; you’re well under 15 min. For many or long clips, keep total processing under ~15 min or consider an async/job queue later.
 
 ### 2.5 Optional: custom domain and HTTPS
 

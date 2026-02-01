@@ -233,5 +233,5 @@ curl -X POST "https://BASE_URL/api/v1/merge" \
 
 - **URLs:** Between 2 and 10 per request; each must be a valid HTTP or HTTPS URL.
 - **Duration:** Sum of all input durations must be ≤ 7200 seconds (2 hours).
-- **Timeout:** Merging can take several minutes; use a long client timeout (e.g. 600 seconds).
+- **Timeout:** Merging can take 1–10+ minutes. Use a long client timeout so the request isn’t cut off (e.g. `curl --max-time 900` for 15 min). Railway allows up to 15 minutes per request.
 - **Output:** `merged_url` is a presigned or public URL to the merged MP4; typically valid for 7 days (configurable in storage).
