@@ -158,10 +158,9 @@ def merge_videos(
     )
     filter_complex += f";[{last_video}][{last_audio}]concat=n=1:v=1:a=1[outv][outa]"
 
-    cmd = [
-        "ffmpeg", "-y",
-        *[str(p) for p in paths],
-    ]
+    cmd = ["ffmpeg", "-y"]
+    for p in paths:
+        cmd.extend(["-i", str(p)])
     if need_silence:
         cmd.extend(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"])
     cmd.extend([
