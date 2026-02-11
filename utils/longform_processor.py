@@ -19,8 +19,11 @@ def download_media(url: str, dest: Path) -> None:
                 f.write(chunk)
 
 
-def get_audio_duration(path: Path) -> float:
-    """Get duration of an audio file in seconds using ffprobe."""
+def get_media_duration(path: Path) -> float:
+    """
+    Get duration of an audio or video file in seconds using ffprobe.
+    Raises ValueError if duration cannot be determined.
+    """
     result = subprocess.run(
         [
             "ffprobe",
@@ -34,9 +37,18 @@ def get_audio_duration(path: Path) -> float:
         timeout=30,
     )
     if result.returncode != 0:
-        raise ValueError(f"Invalid audio file: {result.stderr or result.stdout}")
-    
-    duration = float((result.stdout or "").strip())
+        raise ValueError(f"Invalid media file: {result.stderr or result.stdout}")
+
+    raw = (result.stdout or "").strip()
+    # ffprobe can return "N/A" or an empty string for some inputs
+    if not raw or raw.upper() == "N/A":
+        raise ValueError("Could not determine media duration (ffprobe returned N/A).")
+
+    try:
+        duration = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"Could not parse media duration from ffprobe output: {raw!r}") from exc
+
     return duration
 
 
@@ -65,7 +77,7 @@ def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
         raise RuntimeError(f"Audio concatenation failed: {result.stderr[-1000:]}")
     
     # Get final duration
-    total_duration = get_audio_duration(output_path)
+    total_duration = get_media_duration(output_path)
     list_file.unlink()
     
     return total_duration
@@ -163,32 +175,30 @@ def create_video_from_videos(
     # Get durations of all background videos
     bg_durations = []
     for vp in video_paths:
-        dur = get_audio_duration(vp)  # works for videos too
+        dur = get_media_duration(vp)
         bg_durations.append(dur)
     
     total_bg_duration = sum(bg_durations)
     
+    # Calculate how many times we need to loop the videos
+    num_loops = int(final_duration / total_bg_duration) + 1
+    
     # Build filter_complex
-    # Step 1: Scale, pad, and remove audio from each background video
+    # Step 1: Scale and pad each background video
     filter_parts = []
     for i in range(len(video_paths)):
         filter_parts.append(
             f"[{i}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1[v{i}]"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30[v{i}]"
         )
     
     # Step 2: Concatenate background videos
     concat_inputs = "".join([f"[v{i}]" for i in range(len(video_paths))])
     filter_parts.append(f"{concat_inputs}concat=n={len(video_paths)}:v=1:a=0[vbg]")
     
-    # Step 3: Loop the concatenated background to match audio duration
-    # We'll use the loop filter or just let FFmpeg repeat
-    # For simplicity, we'll create a long enough loop by repeating concat
-    num_loops = int(audio_duration / total_bg_duration) + 2
-    
-    # Simpler approach: use -stream_loop on a pre-concatenated video
-    # But filter_complex doesn't support stream_loop directly
-    # So we'll output [vbg] and use shortest with audio
+    # Step 3: Loop the video to match audio duration
+    # Use loop filter: loop=-1 means infinite loop, we'll cut it with -t
+    filter_parts.append(f"[vbg]loop=loop={num_loops}:size=32767:start=0[vloop]")
     
     filter_complex = ";".join(filter_parts)
     
@@ -206,28 +216,16 @@ def create_video_from_videos(
     # Add audio input
     cmd.extend(["-i", str(audio_path)])
     
-    # If total background duration < audio duration, we need to loop
-    if total_bg_duration < audio_duration:
-        # Use -stream_loop on inputs (but complex with multiple inputs)
-        # Alternative: create the video filter to loop
-        filter_parts.append(f"[vbg]loop=loop={num_loops}:size=1:start=0[vloop]")
-        final_video_label = "vloop"
-    else:
-        final_video_label = "vbg"
-    
-    filter_complex = ";".join(filter_parts)
-    
     cmd.extend([
         "-filter_complex", filter_complex,
-        "-map", f"[{final_video_label}]",
+        "-map", "[vloop]",
         "-map", f"{audio_idx}:a",
         "-c:v", "libx264",
         "-preset", "medium",
         "-crf", "23",
         "-c:a", "aac",
         "-b:a", "128k",
-        "-t", str(final_duration),  # Cap at 2 hours
-        "-shortest",
+        "-t", str(final_duration),  # Cap at exact duration
         str(output_path),
     ])
     
