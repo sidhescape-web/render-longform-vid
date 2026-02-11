@@ -14,5 +14,25 @@ venv/
 .env.local
 *.mp4
 *.webm
+*.mp3
+*.wav
+*.m4a
+*.jpg
+*.jpeg
+*.png
+*.gif
 /tmp/
 /temp/
+
+# SQLite database
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

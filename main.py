@@ -1,5 +1,6 @@
 """
 Video Merge API – accepts 2–10 video URLs, merges with quality/aspect ratio, returns merged video URL.
+Also supports longform video rendering with async processing.
 """
 import logging
 import re
@@ -14,7 +15,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 logger = logging.getLogger(__name__)
+
 from utils.auth import get_api_key
 from utils.storage import upload_merged_video
 from utils.video_processor import (
@@ -23,6 +30,9 @@ from utils.video_processor import (
     get_duration_and_has_audio,
     merge_videos,
 )
+from utils.db import init_db
+from utils.worker import start_worker_background
+from routers.longform import router as longform_router
 
 # --- Request / Response models ---
 
@@ -161,11 +171,22 @@ def merge(
 
 app = FastAPI(
     title="Video Merge API",
-    description="Merge 2–10 video URLs with configurable quality and aspect ratio.",
-    version="1.0.0",
+    description="Merge 2–10 video URLs with configurable quality and aspect ratio. Also supports longform video rendering with async processing.",
+    version="2.0.0",
 )
 
 app.include_router(router)
+app.include_router(longform_router)
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database and start background worker on startup."""
+    logger.info("Starting application...")
+    await init_db()
+    logger.info("Database initialized")
+    start_worker_background()
+    logger.info("Background worker started")
 
 
 @app.exception_handler(HTTPException)
@@ -192,7 +213,12 @@ def root():
         "message": "Video Merge API",
         "docs": "/docs",
         "health": "/health",
-        "merge": "POST /api/v1/merge (requires X-API-Key)",
+        "endpoints": {
+            "merge": "POST /api/v1/merge (requires X-API-Key)",
+            "longform_render": "POST /api/v1/longform/render (requires X-API-Key)",
+            "longform_status": "GET /api/v1/longform/status/{request_id} (requires X-API-Key)",
+            "longform_result": "GET /api/v1/longform/result/{request_id} (requires X-API-Key)",
+        },
     }
 
 

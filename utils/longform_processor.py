@@ -1,0 +1,307 @@
+"""Longform video processor - creates videos from audio + background images/videos."""
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import List, Tuple
+import httpx
+
+MAX_LONGFORM_DURATION_SECONDS = 7200  # 2 hours
+DOWNLOAD_TIMEOUT = 300  # 5 min per file
+
+
+def download_media(url: str, dest: Path) -> None:
+    """Download a single media file (audio, image, or video) from URL to dest."""
+    with httpx.stream("GET", url, timeout=DOWNLOAD_TIMEOUT, follow_redirects=True) as r:
+        r.raise_for_status()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest, "wb") as f:
+            for chunk in r.iter_bytes():
+                f.write(chunk)
+
+
+def get_audio_duration(path: Path) -> float:
+    """Get duration of an audio file in seconds using ffprobe."""
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise ValueError(f"Invalid audio file: {result.stderr or result.stdout}")
+    
+    duration = float((result.stdout or "").strip())
+    return duration
+
+
+def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
+    """
+    Concatenate multiple audio files into one.
+    Returns the total duration in seconds.
+    """
+    # Create a file list for FFmpeg concat demuxer
+    list_file = output_path.parent / "audio_list.txt"
+    with open(list_file, "w") as f:
+        for p in audio_paths:
+            f.write(f"file '{p.absolute()}'\n")
+    
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", str(list_file),
+        "-c", "copy",
+        str(output_path),
+    ]
+    
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if result.returncode != 0:
+        raise RuntimeError(f"Audio concatenation failed: {result.stderr[-1000:]}")
+    
+    # Get final duration
+    total_duration = get_audio_duration(output_path)
+    list_file.unlink()
+    
+    return total_duration
+
+
+def create_video_from_images(
+    image_paths: List[Path],
+    audio_path: Path,
+    output_path: Path,
+    quality: str,
+    audio_duration: float,
+) -> float:
+    """
+    Create a video from images and audio.
+    Images are looped/cycled to match audio duration.
+    Fixed aspect ratio: 16:9
+    Resolution: 720p or 1080p
+    Returns final video duration (capped at 2 hours).
+    """
+    width, height = (1280, 720) if quality == "720" else (1920, 1080)
+    
+    # Calculate how long each image should be displayed
+    num_images = len(image_paths)
+    duration_per_image = audio_duration / num_images
+    
+    # Cap total duration at 2 hours
+    final_duration = min(audio_duration, MAX_LONGFORM_DURATION_SECONDS)
+    
+    # Create input list with duration for each image
+    inputs = []
+    filter_parts = []
+    
+    for i, img_path in enumerate(image_paths):
+        inputs.extend(["-loop", "1", "-t", str(duration_per_image), "-i", str(img_path)])
+        # Scale and pad each image to target resolution
+        filter_parts.append(
+            f"[{i}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30[v{i}]"
+        )
+    
+    # Add audio input
+    inputs.extend(["-i", str(audio_path)])
+    audio_idx = num_images
+    
+    # Concatenate all scaled images
+    filter_parts.append(
+        "".join([f"[v{i}]" for i in range(num_images)]) +
+        f"concat=n={num_images}:v=1:a=0[v]"
+    )
+    
+    filter_complex = ";".join(filter_parts)
+    
+    cmd = [
+        "ffmpeg", "-y",
+        *inputs,
+        "-filter_complex", filter_complex,
+        "-map", "[v]",
+        "-map", f"{audio_idx}:a",
+        "-c:v", "libx264",
+        "-preset", "medium",
+        "-crf", "23",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-t", str(final_duration),  # Cap duration
+        "-shortest",
+        str(output_path),
+    ]
+    
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+    if result.returncode != 0:
+        raise RuntimeError(f"Video creation failed: {result.stderr[-2000:]}")
+    
+    return final_duration
+
+
+def create_video_from_videos(
+    video_paths: List[Path],
+    audio_path: Path,
+    output_path: Path,
+    quality: str,
+    audio_duration: float,
+) -> float:
+    """
+    Create a video from background videos and audio.
+    Videos are looped/concatenated and muted to match audio duration.
+    Fixed aspect ratio: 16:9
+    Resolution: 720p or 1080p
+    Returns final video duration (capped at 2 hours).
+    """
+    width, height = (1280, 720) if quality == "720" else (1920, 1080)
+    
+    # Cap total duration at 2 hours
+    final_duration = min(audio_duration, MAX_LONGFORM_DURATION_SECONDS)
+    
+    # Get durations of all background videos
+    bg_durations = []
+    for vp in video_paths:
+        dur = get_audio_duration(vp)  # works for videos too
+        bg_durations.append(dur)
+    
+    total_bg_duration = sum(bg_durations)
+    
+    # Build filter_complex
+    # Step 1: Scale, pad, and remove audio from each background video
+    filter_parts = []
+    for i in range(len(video_paths)):
+        filter_parts.append(
+            f"[{i}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1[v{i}]"
+        )
+    
+    # Step 2: Concatenate background videos
+    concat_inputs = "".join([f"[v{i}]" for i in range(len(video_paths))])
+    filter_parts.append(f"{concat_inputs}concat=n={len(video_paths)}:v=1:a=0[vbg]")
+    
+    # Step 3: Loop the concatenated background to match audio duration
+    # We'll use the loop filter or just let FFmpeg repeat
+    # For simplicity, we'll create a long enough loop by repeating concat
+    num_loops = int(audio_duration / total_bg_duration) + 2
+    
+    # Simpler approach: use -stream_loop on a pre-concatenated video
+    # But filter_complex doesn't support stream_loop directly
+    # So we'll output [vbg] and use shortest with audio
+    
+    filter_complex = ";".join(filter_parts)
+    
+    # Audio input index
+    audio_idx = len(video_paths)
+    
+    cmd = [
+        "ffmpeg", "-y",
+    ]
+    
+    # Add all background videos as inputs
+    for vp in video_paths:
+        cmd.extend(["-i", str(vp)])
+    
+    # Add audio input
+    cmd.extend(["-i", str(audio_path)])
+    
+    # If total background duration < audio duration, we need to loop
+    if total_bg_duration < audio_duration:
+        # Use -stream_loop on inputs (but complex with multiple inputs)
+        # Alternative: create the video filter to loop
+        filter_parts.append(f"[vbg]loop=loop={num_loops}:size=1:start=0[vloop]")
+        final_video_label = "vloop"
+    else:
+        final_video_label = "vbg"
+    
+    filter_complex = ";".join(filter_parts)
+    
+    cmd.extend([
+        "-filter_complex", filter_complex,
+        "-map", f"[{final_video_label}]",
+        "-map", f"{audio_idx}:a",
+        "-c:v", "libx264",
+        "-preset", "medium",
+        "-crf", "23",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-t", str(final_duration),  # Cap at 2 hours
+        "-shortest",
+        str(output_path),
+    ])
+    
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+    if result.returncode != 0:
+        raise RuntimeError(f"Video creation from videos failed: {result.stderr[-2000:]}")
+    
+    return final_duration
+
+
+def process_longform_video(
+    audio_urls: List[str],
+    background_source: str,
+    background_urls: List[str],
+    quality: str,
+    temp_dir: Path,
+) -> Tuple[Path, float]:
+    """
+    Main processing function for longform videos.
+    
+    Args:
+        audio_urls: List of audio file URLs (1-30)
+        background_source: Either 'images' or 'videos'
+        background_urls: List of background media URLs (1-15 for images, 1-5 for videos)
+        quality: '720' or '1080'
+        temp_dir: Temporary directory for processing
+    
+    Returns:
+        (output_path, duration_seconds)
+    """
+    # Download all audio files
+    audio_paths = []
+    for i, url in enumerate(audio_urls):
+        dest = temp_dir / f"audio_{i}.mp3"
+        download_media(url, dest)
+        audio_paths.append(dest)
+    
+    # Concatenate audio files
+    combined_audio = temp_dir / "combined_audio.mp3"
+    total_audio_duration = concatenate_audio(audio_paths, combined_audio)
+    
+    # Cap audio duration at 2 hours
+    if total_audio_duration > MAX_LONGFORM_DURATION_SECONDS:
+        total_audio_duration = MAX_LONGFORM_DURATION_SECONDS
+    
+    # Download background media
+    bg_paths = []
+    for i, url in enumerate(background_urls):
+        if background_source == "images":
+            ext = "jpg"  # Could be improved by detecting from URL
+            dest = temp_dir / f"bg_{i}.{ext}"
+        else:
+            dest = temp_dir / f"bg_video_{i}.mp4"
+        download_media(url, dest)
+        bg_paths.append(dest)
+    
+    # Create final video
+    output_path = temp_dir / "longform_output.mp4"
+    
+    if background_source == "images":
+        final_duration = create_video_from_images(
+            bg_paths,
+            combined_audio,
+            output_path,
+            quality,
+            total_audio_duration,
+        )
+    else:  # videos
+        final_duration = create_video_from_videos(
+            bg_paths,
+            combined_audio,
+            output_path,
+            quality,
+            total_audio_duration,
+        )
+    
+    return output_path, final_duration
