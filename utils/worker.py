@@ -28,19 +28,24 @@ async def process_job(job: dict) -> None:
     temp_dir = Path(tempfile.mkdtemp())
     
     try:
-        # Process the video
-        output_path, duration = process_longform_video(
-            audio_urls=job["audio_urls"],
-            background_source=job["background_source"],
-            background_urls=job["background_urls"],
-            quality=job["quality"],
-            temp_dir=temp_dir,
+        # Process the video in a thread pool to avoid blocking the event loop
+        loop = asyncio.get_event_loop()
+        output_path, duration = await loop.run_in_executor(
+            None,  # Use default thread pool
+            process_longform_video,
+            job["audio_urls"],
+            job["background_source"],
+            job["background_urls"],
+            job["quality"],
+            temp_dir,
         )
         
-        # Upload result
-        result_url = upload_merged_video(
+        # Upload result (also blocking, run in thread pool)
+        result_url = await loop.run_in_executor(
+            None,
+            upload_merged_video,
             output_path,
-            key_prefix=f"longform-{job_id[:12]}",
+            f"longform-{job_id[:12]}",
         )
         
         processing_time = time.perf_counter() - start_time
