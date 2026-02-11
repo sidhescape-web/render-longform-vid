@@ -80,6 +80,11 @@ class JobResultResponse(BaseModel):
     result_url: str
     duration_seconds: float
     processing_time: float
+    # Original request data
+    audio_urls: List[str]
+    background_source: str
+    background_urls: List[str]
+    quality: str
 
 
 # --- Endpoints ---
@@ -182,4 +187,9 @@ async def get_render_result(
         result_url=job["result_url"],
         duration_seconds=job["duration_seconds"],
         processing_time=job["processing_time"],
+        # Include original request data
+        audio_urls=job["audio_urls"],
+        background_source=job["background_source"],
+        background_urls=job["background_urls"],
+        quality=job["quality"],
     )
